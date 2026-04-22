@@ -54,6 +54,74 @@
       draw();
     }
 
+    // ── Week day blocks ────────────────────────────────────────────────────────
+    const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+    // Layout: 12 units wide × 20 units tall, 1-unit gap between blocks, 1-unit left margin
+    // Row 1: Mon–Thu (indices 0–3), Row 2: Fri–Sun (indices 4–6)
+    // Each unit = GRID_SPACING world pixels
+    const BLOCK_W = 12 * GRID_SPACING;   // 360 world px
+    const BLOCK_H = 20 * GRID_SPACING;   // 600 world px
+    const BLOCK_GAP = 1 * GRID_SPACING;  // 30 world px between blocks
+    const BLOCK_MARGIN_X = 1 * GRID_SPACING;
+    const BLOCK_ROW1_Y = 2 * GRID_SPACING;  // leave 2 units above for label
+    const BLOCK_ROW2_Y = BLOCK_ROW1_Y + BLOCK_H + 2 * GRID_SPACING;
+
+    const DAY_BLOCKS = DAYS.map((name, i) => {
+      const row = i < 4 ? 0 : 1;
+      const col = i < 4 ? i : i - 4;
+      return {
+        name,
+        wx: BLOCK_MARGIN_X + col * (BLOCK_W + BLOCK_GAP),
+        wy: row === 0 ? BLOCK_ROW1_Y : BLOCK_ROW2_Y,
+      };
+    });
+
+    function drawDayBlock(name, wx, wy) {
+      const sx = wx * scale + offsetX;
+      const sy = wy * scale + offsetY;
+      const sw = BLOCK_W * scale;
+      const sh = BLOCK_H * scale;
+
+      const fontSize = Math.max(8, Math.round(14 * scale));
+      ctx.font = `bold ${fontSize}px sans-serif`;
+
+      const textWidth = ctx.measureText(name).width;
+      const textPad   = 6 * scale;
+      const gapW      = textWidth + textPad * 2;
+      const gapStart  = (sw - gapW) / 2;
+
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth   = 2.5;
+      ctx.lineJoin    = 'round';
+
+      // Top-left segment
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + gapStart, sy);
+      ctx.stroke();
+
+      // Top-right segment
+      ctx.beginPath();
+      ctx.moveTo(sx + gapStart + gapW, sy);
+      ctx.lineTo(sx + sw, sy);
+      ctx.stroke();
+
+      // Right, bottom, left sides
+      ctx.beginPath();
+      ctx.moveTo(sx + sw, sy);
+      ctx.lineTo(sx + sw, sy + sh);
+      ctx.lineTo(sx,       sy + sh);
+      ctx.lineTo(sx,       sy);
+      ctx.stroke();
+
+      // Label text centered in the gap, vertically centred on the top border
+      ctx.fillStyle    = '#000000';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(name, sx + sw / 2, sy);
+    }
+
     // ── Draw ───────────────────────────────────────────────────────────────────
     function draw() {
       const w = canvas.width;
@@ -82,6 +150,9 @@
           ctx.fill();
         }
       }
+
+      // Draw day blocks on top of the grid
+      DAY_BLOCKS.forEach(({ name, wx, wy }) => drawDayBlock(name, wx, wy));
     }
 
     // ── Zoom (mouse wheel) ─────────────────────────────────────────────────────
