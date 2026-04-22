@@ -178,12 +178,9 @@
         const zoomFactor = dist / (lastTouchDist || dist);
         const newScale   = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale * zoomFactor));
 
-        offsetX = mid.x - (lastTouchMidX - offsetX) * (newScale / scale) - (mid.x - lastTouchMidX);
-        offsetY = mid.y - (lastTouchMidY - offsetY) * (newScale / scale) - (mid.y - lastTouchMidY);
-
-        // also handle pan between pinch frames
-        offsetX += mid.x - lastTouchMidX;
-        offsetY += mid.y - lastTouchMidY;
+        // Zoom toward lastTouchMid and apply midpoint translation as pan in one step
+        offsetX = mid.x - (lastTouchMidX - offsetX) * (newScale / scale);
+        offsetY = mid.y - (lastTouchMidY - offsetY) * (newScale / scale);
 
         scale         = newScale;
         lastTouchDist = dist;
