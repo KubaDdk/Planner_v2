@@ -83,6 +83,32 @@ function saveEvents() {
   localStorage.setItem('planner_events', JSON.stringify(events));
 }
 
+// ── Todos data model ───────────────────────────────────────────────────────────
+function loadTodos() {
+  try { return JSON.parse(localStorage.getItem('planner_todos') || '[]'); }
+  catch { return []; }
+}
+function saveTodos() {
+  localStorage.setItem('planner_todos', JSON.stringify(todos));
+}
+
+let todos   = loadTodos();
+let todoNextId = todos.reduce((m, t) => Math.max(m, t.id + 1), 0);
+
+function createTodo(text) {
+  const t = { id: todoNextId++, text, checked: false };
+  todos.push(t);
+  saveTodos();
+  return t;
+}
+function deleteTodo(id) {
+  todos = todos.filter(t => t.id !== id);
+  saveTodos();
+}
+
+// Hit-areas populated each draw() call, used by mouse handlers
+let todoHitAreas = [];  // [{ type:'checkbox'|'text'|'delete'|'add', id, x, y, w, h }]
+
 let events = loadEvents();
 let nextId  = events.reduce((m, e) => Math.max(m, e.id + 1), 0);
 
@@ -264,19 +290,252 @@ function drawDayBlock(name, dateStr, wx, wy) {
 function drawWeeklyPlannerContent(wx, wy) {
   const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   const today  = new Date();
-  const label  = `${String(today.getDate()).padStart(2, '0')} ${MONTHS[today.getMonth()]} ${today.getFullYear()}`;
+  const dateLabel = `${String(today.getDate()).padStart(2, '0')} ${MONTHS[today.getMonth()]} ${today.getFullYear()}`;
 
-  const sx         = wx * scale + offsetX;
-  const sy         = wy * scale + offsetY;
-  const sw         = BLOCK_W * scale;
-  const sh         = BLOCK_H * scale;
-  const fontSize   = Math.max(14, Math.round(22 * scale));
+  const sx  = wx * scale + offsetX;
+  const sy  = wy * scale + offsetY;
+  const sw  = BLOCK_W * scale;
+  const sh  = BLOCK_H * scale;
+  const pad = 14 * scale;
 
-  ctx.font         = `${fontSize}px sans-serif`;
+  const sepFontSz  = Math.max(10, Math.round(14 * scale));
+  const itemFontSz = Math.max(10, Math.round(15 * scale));
+  const boxSize    = Math.max(10, Math.round(14 * scale));
+  const rowH       = boxSize * 2.0;
+
+  // ── Today date ──────────────────────────────────────────────────────────────
+  const dateFontSize = Math.max(14, Math.round(22 * scale));
+  ctx.font         = `${dateFontSize}px sans-serif`;
   ctx.fillStyle    = '#333333';
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(label, sx + sw / 2, sy + sh * 0.12);
+  const dateY = sy + sh * 0.07;
+  ctx.fillText(dateLabel, sx + sw / 2, dateY);
+
+  // ── TO DO TODAY section ─────────────────────────────────────────────────────
+  // dayIndex: 0=Mon … 6=Sun; JS getDay(): 0=Sun … 6=Sat → (jsDay+6)%7
+  const todayDayIndex  = (today.getDay() + 6) % 7;
+  const todayEvents    = events
+    .filter(e => e.dayIndex === todayDayIndex)
+    .sort((a, b) => a.startHour - b.startHour);
+
+  let cursorY = dateY + rowH * 0.9;
+
+  if (todayEvents.length > 0) {
+    // Separator
+    ctx.font      = `bold ${sepFontSz}px sans-serif`;
+    ctx.fillStyle = '#555555';
+    ctx.textAlign = 'center';
+    ctx.fillText('─── TO DO TODAY ───', sx + sw / 2, cursorY);
+    cursorY += rowH * 0.85;
+
+    // Event list
+    const evFontSz  = Math.max(9, Math.round(13 * scale));
+    const bulletX   = sx + pad;
+    const textX     = bulletX + 12 * scale;
+    const maxEvTextW = sw - textX - pad + sx;
+
+    ctx.font         = `${evFontSz}px sans-serif`;
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'middle';
+
+    todayEvents.forEach(ev => {
+      const hour  = DAY_START_HOUR + ev.startHour;
+      const hh    = String(hour).padStart(2, '0');
+      const mm    = ev.startHour % 1 !== 0 ? '30' : '00';
+      const timeStr = `${hh}:${mm}`;
+      const rawText = ev.title && ev.title.trim() ? ev.title.trim() : '(no title)';
+      let display   = `${timeStr}  ${rawText}`;
+
+      ctx.font = `${evFontSz}px sans-serif`;
+      const avail = sw - pad * 2;
+      while (display.length > timeStr.length + 3 && ctx.measureText(display).width > avail) {
+        display = display.slice(0, -1);
+      }
+      if (display.length < `${timeStr}  ${rawText}`.length) display = display.slice(0, -1) + '…';
+
+      // Bullet dot
+      ctx.fillStyle = '#4a90d9';
+      ctx.beginPath();
+      ctx.arc(bulletX + 3 * scale, cursorY, 3 * scale, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#333333';
+      ctx.fillText(display, textX, cursorY);
+      cursorY += rowH * 0.75;
+    });
+
+    cursorY += rowH * 0.2;
+  }
+
+  // ── TODO separator ──────────────────────────────────────────────────────────
+  const sepY = cursorY;
+  ctx.font      = `bold ${sepFontSz}px sans-serif`;
+  ctx.fillStyle = '#555555';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('─── TODO ───', sx + sw / 2, sepY);
+
+  // ── Checkboxes ──────────────────────────────────────────────────────────────
+  const textOffX = pad + boxSize + 8 * scale;
+  const startY   = sepY + rowH * 0.9;
+  const maxTextW = sw - textOffX - pad - boxSize;
+
+  todoHitAreas = [];
+
+  ctx.font         = `${itemFontSz}px sans-serif`;
+  ctx.textBaseline = 'middle';
+
+  todos.forEach((todo, i) => {
+    const rowY  = startY + i * rowH;
+    const midY  = rowY + rowH / 2;
+    const bx    = sx + pad;
+    const by    = midY - boxSize / 2;
+    const isEditingThis = todoEditId === todo.id;
+
+    // Checkbox border
+    ctx.strokeStyle = todo.checked ? '#4a90d9' : '#888888';
+    ctx.lineWidth   = 1.5;
+    ctx.fillStyle   = todo.checked ? '#4a90d9' : '#ffffff';
+    ctx.beginPath();
+    ctx.roundRect(bx, by, boxSize, boxSize, 3);
+    ctx.fill();
+    ctx.stroke();
+
+    // Checkmark
+    if (todo.checked) {
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth   = Math.max(1.5, 2 * scale);
+      ctx.lineCap     = 'round';
+      ctx.lineJoin    = 'round';
+      ctx.beginPath();
+      ctx.moveTo(bx + boxSize * 0.18, by + boxSize * 0.5);
+      ctx.lineTo(bx + boxSize * 0.42, by + boxSize * 0.72);
+      ctx.lineTo(bx + boxSize * 0.82, by + boxSize * 0.25);
+      ctx.stroke();
+    }
+
+    const inputX = sx + textOffX;
+    const inputW = maxTextW;
+    const inputH = rowH * 0.78;
+    const inputY = midY - inputH / 2;
+
+    if (isEditingThis) {
+      // Inline text input box
+      ctx.fillStyle   = '#f0f6ff';
+      ctx.strokeStyle = '#4a90d9';
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(inputX - 4, inputY, inputW + 8, inputH, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font         = `${itemFontSz}px sans-serif`;
+      ctx.fillStyle    = '#111111';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      // Draw text clipped to input box
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(inputX - 2, inputY + 1, inputW + 4, inputH - 2);
+      ctx.clip();
+      ctx.fillText(todoEditText, inputX, midY);
+      // Blinking cursor
+      if (todoEditBlinkOn) {
+        const cursorX = inputX + ctx.measureText(todoEditText.slice(0, todoEditCursor)).width;
+        ctx.strokeStyle = '#333333';
+        ctx.lineWidth   = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(cursorX, inputY + 3);
+        ctx.lineTo(cursorX, inputY + inputH - 3);
+        ctx.stroke();
+      }
+      ctx.restore();
+    } else {
+      // Label text (strikethrough if checked)
+      ctx.fillStyle    = todo.checked ? '#aaaaaa' : '#222222';
+      ctx.font         = `${itemFontSz}px sans-serif`;
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      let displayText  = todo.text || '(no text)';
+      while (displayText.length > 1 && ctx.measureText(displayText).width > maxTextW) {
+        displayText = displayText.slice(0, -1);
+      }
+      if (displayText !== todo.text) displayText = displayText.slice(0, -1) + '\u2026';
+      ctx.fillText(displayText, inputX, midY);
+
+      if (todo.checked) {
+        const tw = ctx.measureText(displayText).width;
+        ctx.strokeStyle = '#aaaaaa';
+        ctx.lineWidth   = 1;
+        ctx.beginPath();
+        ctx.moveTo(inputX, midY);
+        ctx.lineTo(inputX + tw, midY);
+        ctx.stroke();
+      }
+    }
+
+    // Delete button '×'
+    const delFontSz = Math.max(10, Math.round(13 * scale));
+    const delX      = sx + sw - pad - delFontSz;
+    ctx.font        = `${delFontSz}px sans-serif`;
+    ctx.fillStyle   = '#cccccc';
+    ctx.textAlign   = 'center';
+    ctx.fillText('\u2715', delX, midY);
+    ctx.font        = `${itemFontSz}px sans-serif`; // restore
+
+    // Register hit areas
+    todoHitAreas.push({ type: 'checkbox', id: todo.id, x: bx, y: by, w: boxSize, h: boxSize });
+    todoHitAreas.push({ type: 'text', id: todo.id, x: inputX, y: rowY, w: maxTextW, h: rowH });
+    todoHitAreas.push({ type: 'delete', id: todo.id, x: delX - delFontSz, y: rowY, w: delFontSz * 2, h: rowH });
+  });
+
+  // ── Add button / new-todo inline input ─────────────────────────────────────
+  const addY      = startY + todos.length * rowH + rowH * 0.2;
+  const addFontSz = Math.max(10, Math.round(13 * scale));
+  const addMidY   = addY + rowH / 2;
+
+  if (todoEditId === 'new') {
+    // Inline input for new todo
+    const inputX = sx + pad;
+    const inputW = sw - pad * 2;
+    const inputH = rowH * 0.78;
+    const inputY = addMidY - inputH / 2;
+    ctx.fillStyle   = '#f0f6ff';
+    ctx.strokeStyle = '#4a90d9';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(inputX - 4, inputY, inputW + 8, inputH, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.font         = `${addFontSz}px sans-serif`;
+    ctx.fillStyle    = todoEditText ? '#111111' : '#aaaaaa';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(inputX - 2, inputY + 1, inputW + 4, inputH - 2);
+    ctx.clip();
+    ctx.fillText(todoEditText || 'Type and press Enter…', inputX, addMidY);
+    if (todoEditBlinkOn && todoEditText !== undefined) {
+      const cursorX = inputX + ctx.measureText(todoEditText.slice(0, todoEditCursor)).width;
+      ctx.strokeStyle = '#333333';
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(cursorX, inputY + 3);
+      ctx.lineTo(cursorX, inputY + inputH - 3);
+      ctx.stroke();
+    }
+    ctx.restore();
+    todoHitAreas.push({ type: 'add', id: null, x: inputX, y: addY, w: inputW, h: rowH });
+  } else {
+    ctx.font         = `${addFontSz}px sans-serif`;
+    ctx.fillStyle    = '#4a90d9';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('+ Add item', sx + pad, addMidY);
+    todoHitAreas.push({ type: 'add', id: null, x: sx + pad, y: addY, w: 120 * scale, h: rowH });
+  }
 }
 
 // PR 1: Draw horizontal hour lines and labels inside a day block
@@ -454,6 +713,46 @@ function drawEvent(ev) {
   }
 }
 
+// ── Canvas-native inline text editing (todos) ───────────────────────────────
+let todoEditId     = null;   // null | todo.id | 'new'
+let todoEditText   = '';
+let todoEditCursor = 0;
+let todoEditBlinkOn   = true;
+let todoEditBlinkTimer = null;
+
+function startTodoEdit(id, initialText) {
+  commitTodoEdit();
+  commitEdit();
+  todoEditId     = id;
+  todoEditText   = initialText;
+  todoEditCursor = initialText.length;
+  todoEditBlinkOn   = true;
+  todoEditBlinkTimer = setInterval(() => { todoEditBlinkOn = !todoEditBlinkOn; draw(); }, 530);
+  draw();
+}
+
+function commitTodoEdit() {
+  if (todoEditId === null) return;
+  if (todoEditId === 'new') {
+    if (todoEditText.trim()) createTodo(todoEditText.trim());
+  } else {
+    const t = todos.find(t => t.id === todoEditId);
+    if (t) { t.text = todoEditText; saveTodos(); }
+  }
+  _stopTodoEditing();
+}
+
+function cancelTodoEdit() { _stopTodoEditing(); }
+
+function _stopTodoEditing() {
+  clearInterval(todoEditBlinkTimer);
+  todoEditBlinkTimer = null;
+  todoEditId     = null;
+  todoEditText   = '';
+  todoEditCursor = 0;
+  draw();
+}
+
 // ── Canvas-native inline text editing ────────────────────────────────────────
 let editingEvent  = null;
 let editText      = '';
@@ -493,6 +792,26 @@ function _stopEditing() {
 }
 
 window.addEventListener('keydown', (e) => {
+  // ── Todo inline editing ──
+  if (todoEditId !== null) {
+    e.preventDefault();
+    if (e.key === 'Enter' || e.key === 'Escape') { e.key === 'Enter' ? commitTodoEdit() : cancelTodoEdit(); return; }
+    if (e.key === 'Backspace')       { if (todoEditCursor > 0) { todoEditText = todoEditText.slice(0, todoEditCursor - 1) + todoEditText.slice(todoEditCursor); todoEditCursor--; } }
+    else if (e.key === 'Delete')     { todoEditText = todoEditText.slice(0, todoEditCursor) + todoEditText.slice(todoEditCursor + 1); }
+    else if (e.key === 'ArrowLeft')  { todoEditCursor = Math.max(0, todoEditCursor - 1); }
+    else if (e.key === 'ArrowRight') { todoEditCursor = Math.min(todoEditText.length, todoEditCursor + 1); }
+    else if (e.key === 'Home')       { todoEditCursor = 0; }
+    else if (e.key === 'End')        { todoEditCursor = todoEditText.length; }
+    else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+      todoEditText = todoEditText.slice(0, todoEditCursor) + e.key + todoEditText.slice(todoEditCursor);
+      todoEditCursor++;
+    }
+    todoEditBlinkOn = true;
+    draw();
+    return;
+  }
+
+  // ── Event inline editing ──
   if (!editingEvent) return;
   e.preventDefault();
   if (e.key === 'Enter')       { commitEdit(); return; }
@@ -515,6 +834,7 @@ window.addEventListener('keydown', (e) => {
 canvas.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
   commitEdit();
+  commitTodoEdit();
 
   const sx = e.clientX;
   const sy = e.clientY;
@@ -553,6 +873,29 @@ canvas.addEventListener('mousedown', (e) => {
     }
     draw();
     return;
+  }
+
+  // Hit-test todo areas
+  const todoHit = todoHitAreas.find(a => sx >= a.x && sx <= a.x + a.w && sy >= a.y && sy <= a.y + a.h);
+  if (todoHit) {
+    if (todoHit.type === 'checkbox') {
+      const t = todos.find(t => t.id === todoHit.id);
+      if (t) { t.checked = !t.checked; saveTodos(); draw(); }
+      return;
+    }
+    if (todoHit.type === 'delete') {
+      deleteTodo(todoHit.id);
+      draw();
+      return;
+    }
+    if (todoHit.type === 'add') {
+      startTodoEdit('new', '');
+      return;
+    }
+    if (todoHit.type === 'text') {
+      startTodoEdit(todoHit.id, todos.find(t => t.id === todoHit.id)?.text ?? '');
+      return;
+    }
   }
 
   // Pan
@@ -645,6 +988,10 @@ window.addEventListener('mouseup', () => {
 canvas.addEventListener('dblclick', (e) => {
   const sx = e.clientX;
   const sy = e.clientY;
+
+  // Double-click on todo text → already handled by single-click; just ignore here
+  const todoHitDbl = todoHitAreas.find(a => a.type === 'text' && sx >= a.x && sx <= a.x + a.w && sy >= a.y && sy <= a.y + a.h);
+  if (todoHitDbl) return;
 
   // Double-click on existing event → edit title inline
   const hit = hitTestEvents(sx, sy);
