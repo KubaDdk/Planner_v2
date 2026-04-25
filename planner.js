@@ -1,6 +1,61 @@
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 
+// Hidden input to capture keyboard on mobile (software keyboard trigger)
+const hiddenInput = document.createElement('input');
+hiddenInput.setAttribute('type', 'text');
+hiddenInput.setAttribute('autocomplete', 'off');
+hiddenInput.setAttribute('autocorrect', 'off');
+hiddenInput.setAttribute('autocapitalize', 'off');
+hiddenInput.setAttribute('spellcheck', 'false');
+Object.assign(hiddenInput.style, {
+  position: 'fixed', opacity: '0', pointerEvents: 'none',
+  top: '0', left: '0', width: '1px', height: '1px', fontSize: '16px',
+});
+document.body.appendChild(hiddenInput);
+
+// Sync hidden input value → active edit buffer on every input event (handles
+// mobile IME, paste, autocorrect, etc.)
+hiddenInput.addEventListener('input', () => {
+  const val = hiddenInput.value;
+  if (todoEditId !== null) {
+    todoEditText   = val;
+    todoEditCursor = val.length;
+    todoEditBlinkOn = true;
+    draw();
+  } else if (editingEvent) {
+    editText   = val;
+    editCursor = val.length;
+    editBlinkOn = true;
+    draw();
+  }
+});
+
+hiddenInput.addEventListener('keydown', (ev) => {
+  // Stop propagation so character keys don't also fire the window keydown handler
+  ev.stopPropagation();
+  // Forward only structural keys to the window handler
+  const structural = ['Enter','Escape','Backspace','Delete','ArrowLeft','ArrowRight','Home','End'];
+  if (structural.includes(ev.key)) {
+    // Backspace/Delete: apply manually and update hiddenInput so input event stays in sync
+    if (ev.key === 'Backspace' || ev.key === 'Delete') {
+      // Let the input element handle it natively → input event will fire and sync
+      return;
+    }
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: ev.key, bubbles: true }));
+    ev.preventDefault();
+  }
+});
+
+let hiddenInputBlurring = false;
+
+hiddenInput.addEventListener('blur', () => {
+  if (hiddenInputBlurring) return;
+  // User dismissed keyboard (e.g. tapped outside on mobile) — commit
+  commitEdit();
+  commitTodoEdit();
+});
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 // PR 1: 1 grid unit = 1 hour
 const HOUR_UNIT    = 30;           // world pixels per hour
@@ -728,6 +783,8 @@ function startTodoEdit(id, initialText) {
   todoEditCursor = initialText.length;
   todoEditBlinkOn   = true;
   todoEditBlinkTimer = setInterval(() => { todoEditBlinkOn = !todoEditBlinkOn; draw(); }, 530);
+  hiddenInput.value = initialText;
+  hiddenInput.focus();
   draw();
 }
 
@@ -750,6 +807,10 @@ function _stopTodoEditing() {
   todoEditId     = null;
   todoEditText   = '';
   todoEditCursor = 0;
+  hiddenInput.value = '';
+  hiddenInputBlurring = true;
+  hiddenInput.blur();
+  hiddenInputBlurring = false;
   draw();
 }
 
@@ -768,6 +829,8 @@ function startEditing(ev) {
   selectedEvent = ev;
   editBlinkOn   = true;
   editBlinkTimer = setInterval(() => { editBlinkOn = !editBlinkOn; draw(); }, 530);
+  hiddenInput.value = ev.title;
+  hiddenInput.focus();
   draw();
 }
 
@@ -788,6 +851,10 @@ function _stopEditing() {
   editingEvent   = null;
   editText       = '';
   editCursor     = 0;
+  hiddenInput.value = '';
+  hiddenInputBlurring = true;
+  hiddenInput.blur();
+  hiddenInputBlurring = false;
   draw();
 }
 
@@ -1027,10 +1094,71 @@ canvas.addEventListener('wheel', (e) => {
   draw();
 }, { passive: false });
 
-// ── Touch: pan + pinch-zoom ────────────────────────────────────────────────────
+// ── Touch: pan + pinch-zoom + tap + double-tap ────────────────────────────────
 let lastTouchDist = null;
 let lastTouchMidX = 0;
 let lastTouchMidY = 0;
+
+// Tap / double-tap tracking
+let lastTapTime = 0;
+let lastTapX    = 0;
+let lastTapY    = 0;
+let touchStartX = 0;
+let touchStartY = 0;
+let touchMoved  = false;
+const TAP_MAX_MOVE   = 10;  // px
+const DOUBLE_TAP_GAP = 300; // ms
+
+function handleSingleTap(sx, sy) {
+  // Mirrors mousedown logic for todo hit areas and delete/checkbox
+  commitEdit();
+  commitTodoEdit();
+
+  const delEv = hitTestDeleteButton(sx, sy);
+  if (delEv) {
+    if (selectedEvent === delEv) selectedEvent = null;
+    if (hoveredEvent  === delEv) hoveredEvent  = null;
+    deleteEvent(delEv.id);
+    draw();
+    return;
+  }
+
+  const todoHit = todoHitAreas.find(a => sx >= a.x && sx <= a.x + a.w && sy >= a.y && sy <= a.y + a.h);
+  if (todoHit) {
+    if (todoHit.type === 'checkbox') {
+      const t = todos.find(t => t.id === todoHit.id);
+      if (t) { t.checked = !t.checked; saveTodos(); draw(); }
+    } else if (todoHit.type === 'delete') {
+      deleteTodo(todoHit.id);
+      draw();
+    } else if (todoHit.type === 'add') {
+      startTodoEdit('new', '');
+    } else if (todoHit.type === 'text') {
+      startTodoEdit(todoHit.id, todos.find(t => t.id === todoHit.id)?.text ?? '');
+    }
+    return;
+  }
+}
+
+function handleDoubleTap(sx, sy) {
+  commitEdit();
+  commitTodoEdit();
+
+  const hit = hitTestEvents(sx, sy);
+  if (hit && !hit.isResizeHandle) {
+    startEditing(hit.event);
+    return;
+  }
+
+  const block = hitTestDayBlock(sx, sy);
+  if (block) {
+    const w    = screenToWorld(sx, sy);
+    const raw  = (w.y - block.wy - BLOCK_INNER_PAD_Y) / HOUR_UNIT;
+    const hour = Math.max(0, Math.min(Math.round(raw * 2) / 2, HOURS_IN_DAY - 0.5));
+    const ev   = createEvent(block.index, hour);
+    startEditing(ev);
+  }
+}
 
 function getTouchMid(touches) {
   return {
@@ -1049,11 +1177,15 @@ canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
   if (e.touches.length === 1) {
     isPanning     = true;
-    lastMouseX    = e.touches[0].clientX;
-    lastMouseY    = e.touches[0].clientY;
+    touchStartX   = e.touches[0].clientX;
+    touchStartY   = e.touches[0].clientY;
+    lastMouseX    = touchStartX;
+    lastMouseY    = touchStartY;
+    touchMoved    = false;
     lastTouchDist = null;
   } else if (e.touches.length === 2) {
     isPanning     = false;
+    touchMoved    = true; // suppress tap if pinch started
     lastTouchDist = getTouchDist(e.touches);
     const mid     = getTouchMid(e.touches);
     lastTouchMidX = mid.x;
@@ -1064,6 +1196,9 @@ canvas.addEventListener('touchstart', (e) => {
 canvas.addEventListener('touchmove', (e) => {
   e.preventDefault();
   if (e.touches.length === 1 && isPanning) {
+    const dx = e.touches[0].clientX - touchStartX;
+    const dy = e.touches[0].clientY - touchStartY;
+    if (Math.sqrt(dx * dx + dy * dy) > TAP_MAX_MOVE) touchMoved = true;
     offsetX   += e.touches[0].clientX - lastMouseX;
     offsetY   += e.touches[0].clientY - lastMouseY;
     lastMouseX = e.touches[0].clientX;
@@ -1075,7 +1210,6 @@ canvas.addEventListener('touchmove', (e) => {
     const zoomFactor = dist / (lastTouchDist || dist);
     const newScale   = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale * zoomFactor));
 
-    // Zoom toward midpoint and apply midpoint translation as pan in one step
     offsetX = mid.x - (lastTouchMidX - offsetX) * (newScale / scale);
     offsetY = mid.y - (lastTouchMidY - offsetY) * (newScale / scale);
 
@@ -1090,7 +1224,30 @@ canvas.addEventListener('touchmove', (e) => {
 canvas.addEventListener('touchend', (e) => {
   e.preventDefault();
   if (e.touches.length < 2) lastTouchDist = null;
-  if (e.touches.length === 0) isPanning = false;
+
+  if (e.touches.length === 0) {
+    isPanning = false;
+
+    if (!touchMoved) {
+      const sx  = e.changedTouches[0].clientX;
+      const sy  = e.changedTouches[0].clientY;
+      const now = Date.now();
+      const dt  = now - lastTapTime;
+      const tapDist = Math.sqrt((sx - lastTapX) ** 2 + (sy - lastTapY) ** 2);
+
+      if (dt < DOUBLE_TAP_GAP && tapDist < TAP_MAX_MOVE * 2) {
+        // Double-tap
+        lastTapTime = 0;
+        handleDoubleTap(sx, sy);
+      } else {
+        // Single tap — fire immediately, also arm double-tap timer
+        lastTapTime = now;
+        lastTapX    = sx;
+        lastTapY    = sy;
+        handleSingleTap(sx, sy);
+      }
+    }
+  }
 }, { passive: false });
 
 // ── Init ───────────────────────────────────────────────────────────────────────
