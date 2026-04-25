@@ -1176,16 +1176,46 @@ function getTouchDist(touches) {
 canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
   if (e.touches.length === 1) {
-    isPanning     = true;
-    touchStartX   = e.touches[0].clientX;
-    touchStartY   = e.touches[0].clientY;
-    lastMouseX    = touchStartX;
-    lastMouseY    = touchStartY;
+    const sx = e.touches[0].clientX;
+    const sy = e.touches[0].clientY;
+    touchStartX   = sx;
+    touchStartY   = sy;
+    lastMouseX    = sx;
+    lastMouseY    = sy;
     touchMoved    = false;
     lastTouchDist = null;
+
+    // Hit-test events for drag/resize — mirrors mousedown
+    const hit = hitTestEvents(sx, sy);
+    if (hit) {
+      commitEdit();
+      commitTodoEdit();
+      selectedEvent = hit.event;
+      activeEvent   = hit.event;
+      if (hit.isResizeHandle) {
+        interactionMode = 'resize';
+        resizeOrigY     = sy;
+        resizeOrigHours = hit.event.durationHours;
+      } else {
+        interactionMode = 'drag-pending'; // confirmed to 'drag' once finger moves enough
+        const w = screenToWorld(sx, sy);
+        const block = DAY_BLOCKS[hit.event.dayIndex];
+        dragOffsetHour = (w.y - block.wy - BLOCK_INNER_PAD_Y) / HOUR_UNIT - hit.event.startHour;
+      }
+      draw();
+      return;
+    }
+
+    isPanning = true;
   } else if (e.touches.length === 2) {
+    // Finger added during drag/resize → cancel it and switch to pinch-zoom
+    if (interactionMode === 'drag' || interactionMode === 'drag-pending' || interactionMode === 'resize') {
+      if (activeEvent) saveEvents();
+      interactionMode = 'idle';
+      activeEvent     = null;
+    }
     isPanning     = false;
-    touchMoved    = true; // suppress tap if pinch started
+    touchMoved    = true;
     lastTouchDist = getTouchDist(e.touches);
     const mid     = getTouchMid(e.touches);
     lastTouchMidX = mid.x;
@@ -1195,15 +1225,48 @@ canvas.addEventListener('touchstart', (e) => {
 
 canvas.addEventListener('touchmove', (e) => {
   e.preventDefault();
-  if (e.touches.length === 1 && isPanning) {
-    const dx = e.touches[0].clientX - touchStartX;
-    const dy = e.touches[0].clientY - touchStartY;
-    if (Math.sqrt(dx * dx + dy * dy) > TAP_MAX_MOVE) touchMoved = true;
-    offsetX   += e.touches[0].clientX - lastMouseX;
-    offsetY   += e.touches[0].clientY - lastMouseY;
-    lastMouseX = e.touches[0].clientX;
-    lastMouseY = e.touches[0].clientY;
-    draw();
+
+  if (e.touches.length === 1) {
+    const sx = e.touches[0].clientX;
+    const sy = e.touches[0].clientY;
+    const dx = sx - touchStartX;
+    const dy = sy - touchStartY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > TAP_MAX_MOVE) touchMoved = true;
+
+    if (interactionMode === 'drag-pending' && dist > TAP_MAX_MOVE) {
+      interactionMode = 'drag';
+    }
+
+    if (interactionMode === 'drag' && activeEvent) {
+      const w = screenToWorld(sx, sy);
+      const targetBlock = DAY_BLOCKS.find(b =>
+        w.x >= b.wx && w.x <= b.wx + BLOCK_W &&
+        w.y >= b.wy && w.y <= b.wy + BLOCK_H
+      ) || null;
+      if (targetBlock) {
+        activeEvent.dayIndex = targetBlock.index;
+        const raw     = (w.y - targetBlock.wy - BLOCK_INNER_PAD_Y) / HOUR_UNIT - dragOffsetHour;
+        const snapped = Math.round(raw * 2) / 2;
+        const maxStart = HOURS_IN_DAY - activeEvent.durationHours;
+        activeEvent.startHour = Math.max(0, Math.min(snapped, maxStart));
+      }
+      draw();
+    } else if (interactionMode === 'resize' && activeEvent) {
+      const dyRes   = sy - resizeOrigY;
+      const rawHrs  = resizeOrigHours + (dyRes / scale) / HOUR_UNIT;
+      const snapped = Math.round(rawHrs * 2) / 2;
+      const maxHrs  = HOURS_IN_DAY - activeEvent.startHour;
+      activeEvent.durationHours = Math.max(0.5, Math.min(snapped, maxHrs));
+      draw();
+    } else if (isPanning) {
+      offsetX   += sx - lastMouseX;
+      offsetY   += sy - lastMouseY;
+      draw();
+    }
+
+    lastMouseX = sx;
+    lastMouseY = sy;
   } else if (e.touches.length === 2) {
     const dist       = getTouchDist(e.touches);
     const mid        = getTouchMid(e.touches);
@@ -1226,9 +1289,26 @@ canvas.addEventListener('touchend', (e) => {
   if (e.touches.length < 2) lastTouchDist = null;
 
   if (e.touches.length === 0) {
+    // Finish drag or resize
+    if (interactionMode === 'drag' || interactionMode === 'resize') {
+      if (activeEvent) saveEvents();
+      interactionMode = 'idle';
+      activeEvent     = null;
+      isPanning       = false;
+      draw();
+      return; // don't treat as tap
+    }
+
+    // drag-pending but finger lifted without moving → it was a tap
+    const wasDragPending = interactionMode === 'drag-pending';
+    if (wasDragPending) {
+      interactionMode = 'idle';
+      activeEvent     = null;
+    }
+
     isPanning = false;
 
-    if (!touchMoved) {
+    if (!touchMoved || wasDragPending) {
       const sx  = e.changedTouches[0].clientX;
       const sy  = e.changedTouches[0].clientY;
       const now = Date.now();
@@ -1236,11 +1316,9 @@ canvas.addEventListener('touchend', (e) => {
       const tapDist = Math.sqrt((sx - lastTapX) ** 2 + (sy - lastTapY) ** 2);
 
       if (dt < DOUBLE_TAP_GAP && tapDist < TAP_MAX_MOVE * 2) {
-        // Double-tap
         lastTapTime = 0;
         handleDoubleTap(sx, sy);
       } else {
-        // Single tap — fire immediately, also arm double-tap timer
         lastTapTime = now;
         lastTapX    = sx;
         lastTapY    = sy;
