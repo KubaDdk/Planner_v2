@@ -28,15 +28,41 @@ const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'
 
 // Layout: 12 units wide × 24 units tall (PR 1: full 24-hour day)
 const BLOCK_W        = 12 * HOUR_UNIT;
-const BLOCK_H        = HOURS_IN_DAY * HOUR_UNIT;  // 720 world px
+const BLOCK_H        = (HOURS_IN_DAY + 1) * HOUR_UNIT;  // 1 extra unit of bottom padding
 const BLOCK_GAP      = 1 * HOUR_UNIT;
 const BLOCK_MARGIN_X = 1 * HOUR_UNIT;
 const BLOCK_ROW1_Y   = 2 * HOUR_UNIT;
 const BLOCK_ROW2_Y   = BLOCK_ROW1_Y + BLOCK_H + 2 * HOUR_UNIT;
 
+// ── Week date helpers ────────────────────────────────────────────────────────
+function getMondayOfCurrentWeek() {
+  const today = new Date();
+  const day   = today.getDay(); // 0=Sun … 6=Sat
+  const diff  = (day === 0 ? -6 : 1 - day); // offset to Monday
+  const monday = new Date(today);
+  monday.setDate(today.getDate() + diff);
+  monday.setHours(0, 0, 0, 0);
+  return monday;
+}
+
+function getWeekDates() {
+  const monday = getMondayOfCurrentWeek();
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    return d;
+  });
+}
+
+const WEEKLY_PLANNER_BLOCK = {
+  name: 'Weekly planner',
+  wx: BLOCK_MARGIN_X,
+  wy: BLOCK_ROW1_Y,
+};
+
 const DAY_BLOCKS = DAYS.map((name, i) => {
-  // Top row: Mon(0), Tue(1), Wed(2) — offset by 1 col so Mon sits above Fri
-  // Bottom row: Thu(3), Fri(4), Sat(5), Sun(6)
+  // Top row: Mon(0), Tue(1), Wed(2) — offset by 1 col so Mon sits above Fri (col 1-3)
+  // Bottom row: Thu(3), Fri(4), Sat(5), Sun(6) (col 0-3)
   const row = i < 3 ? 0 : 1;
   const col = i < 3 ? i + 1 : i - 3;
   return {
@@ -173,14 +199,21 @@ function draw() {
   }
 
   // Day blocks with time grid, then events on top
-  DAY_BLOCKS.forEach(({ name, wx, wy }) => {
-    drawDayBlock(name, wx, wy);
+  drawDayBlock(WEEKLY_PLANNER_BLOCK.name, null, WEEKLY_PLANNER_BLOCK.wx, WEEKLY_PLANNER_BLOCK.wy);
+  drawWeeklyPlannerContent(WEEKLY_PLANNER_BLOCK.wx, WEEKLY_PLANNER_BLOCK.wy);
+  const weekDates = getWeekDates();
+  DAY_BLOCKS.forEach(({ name, index, wx, wy }) => {
+    const d = weekDates[index];
+    const dateStr = `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`;
+    const today = new Date();
+    const isToday = d.getDate() === today.getDate() && d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear();
+    drawDayBlock(isToday ? 'Today' : name, dateStr, wx, wy);
     drawTimeGrid(wx, wy);
   });
   events.forEach(ev => drawEvent(ev));
 }
 
-function drawDayBlock(name, wx, wy) {
+function drawDayBlock(name, dateStr, wx, wy) {
   const sx = wx * scale + offsetX;
   const sy = wy * scale + offsetY;
   const sw = BLOCK_W * scale;
@@ -189,8 +222,8 @@ function drawDayBlock(name, wx, wy) {
 
   const fontSize = Math.max(12, Math.round(20 * scale));
   ctx.font = `bold ${fontSize}px sans-serif`;
-
-  const textWidth = ctx.measureText(name).width;
+  const label     = dateStr ? `${name} ${dateStr}` : name;
+  const textWidth = ctx.measureText(label).width;
   const textPad   = 6 * scale;
   const gapW      = textWidth + textPad * 2;
   const gapStart  = (sw - gapW) / 2;
@@ -224,7 +257,26 @@ function drawDayBlock(name, wx, wy) {
   ctx.fillStyle    = '#000000';
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(name, sx + sw / 2, sy);
+  ctx.font = `bold ${fontSize}px sans-serif`;
+  ctx.fillText(label, sx + sw / 2, sy);
+}
+
+function drawWeeklyPlannerContent(wx, wy) {
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const today  = new Date();
+  const label  = `${String(today.getDate()).padStart(2, '0')} ${MONTHS[today.getMonth()]} ${today.getFullYear()}`;
+
+  const sx         = wx * scale + offsetX;
+  const sy         = wy * scale + offsetY;
+  const sw         = BLOCK_W * scale;
+  const sh         = BLOCK_H * scale;
+  const fontSize   = Math.max(14, Math.round(22 * scale));
+
+  ctx.font         = `${fontSize}px sans-serif`;
+  ctx.fillStyle    = '#333333';
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, sx + sw / 2, sy + sh * 0.12);
 }
 
 // PR 1: Draw horizontal hour lines and labels inside a day block
