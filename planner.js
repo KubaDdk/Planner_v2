@@ -11,9 +11,12 @@ const DOT_COLOR    = '#b0b0b0';
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 10;
 
-const HOURS_IN_DAY     = 24;
-const HOUR_LABEL_W     = 2 * HOUR_UNIT;  // 60 world px reserved for hour labels
-const RESIZE_HANDLE_PX = 8;              // screen-pixel height of resize-handle hit zone
+const HOURS_IN_DAY     = 18;               // 06:00 – 24:00
+const DAY_START_HOUR   = 6;                // hour shown at the top of each day block
+const HOUR_LABEL_W     = 1.5 * HOUR_UNIT;  // 45 world px reserved for hour labels
+const BLOCK_INNER_PAD  = 0.4 * HOUR_UNIT;  // 12 world px horizontal padding inside block
+const BLOCK_INNER_PAD_Y = 0.4 * HOUR_UNIT; // 12 world px vertical padding inside block (top & bottom)
+const RESIZE_HANDLE_PX = 8;                // screen-pixel height of resize-handle hit zone
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let offsetX = 0;
@@ -32,8 +35,10 @@ const BLOCK_ROW1_Y   = 2 * HOUR_UNIT;
 const BLOCK_ROW2_Y   = BLOCK_ROW1_Y + BLOCK_H + 2 * HOUR_UNIT;
 
 const DAY_BLOCKS = DAYS.map((name, i) => {
-  const row = i < 4 ? 0 : 1;
-  const col = i < 4 ? i : i - 4;
+  // Top row: Mon(0), Tue(1), Wed(2) — offset by 1 col so Mon sits above Fri
+  // Bottom row: Thu(3), Fri(4), Sat(5), Sun(6)
+  const row = i < 3 ? 0 : 1;
+  const col = i < 3 ? i + 1 : i - 3;
   return {
     name,
     index: i,
@@ -76,8 +81,8 @@ function screenToWorld(sx, sy) {
 function getEventScreenRect(ev) {
   const block = DAY_BLOCKS[ev.dayIndex];
   const wx    = block.wx + HOUR_LABEL_W;
-  const wy    = block.wy + ev.startHour * HOUR_UNIT;
-  const ww    = BLOCK_W  - HOUR_LABEL_W;
+  const wy    = block.wy + BLOCK_INNER_PAD_Y + ev.startHour * HOUR_UNIT;
+  const ww    = BLOCK_W  - HOUR_LABEL_W - BLOCK_INNER_PAD;
   const wh    = ev.durationHours * HOUR_UNIT;
   return {
     x: wx * scale + offsetX,
@@ -104,9 +109,12 @@ function hitTestDeleteButton(sx, sy) {
     const ev = events[i];
     if (ev !== hoveredEvent && ev !== selectedEvent) continue;
     const r    = getEventScreenRect(ev);
-    const btnX = r.x + r.w - 18;
-    const btnY = r.y + 2;
-    if (sx >= btnX && sx <= btnX + 14 && sy >= btnY && sy <= btnY + 14) return ev;
+    const btnR  = 9;
+    const btnCX = r.x + r.w - btnR - 4;
+    const btnCY = r.y + btnR + 4;
+    const dx = sx - btnCX;
+    const dy = sy - btnCY;
+    if (dx * dx + dy * dy <= btnR * btnR) return ev;
   }
   return null;
 }
@@ -177,8 +185,9 @@ function drawDayBlock(name, wx, wy) {
   const sy = wy * scale + offsetY;
   const sw = BLOCK_W * scale;
   const sh = BLOCK_H * scale;
+  const r  = Math.min(8 * scale, sw / 2, sh / 2);  // corner radius, scaled
 
-  const fontSize = Math.max(8, Math.round(14 * scale));
+  const fontSize = Math.max(12, Math.round(20 * scale));
   ctx.font = `bold ${fontSize}px sans-serif`;
 
   const textWidth = ctx.measureText(name).width;
@@ -190,24 +199,25 @@ function drawDayBlock(name, wx, wy) {
   ctx.lineWidth   = 2.5;
   ctx.lineJoin    = 'round';
 
-  // Top-left segment
+  // Fill block background to cover the dot grid
+  ctx.fillStyle = '#ffffff';
   ctx.beginPath();
-  ctx.moveTo(sx, sy);
-  ctx.lineTo(sx + gapStart, sy);
-  ctx.stroke();
+  ctx.roundRect(sx, sy, sw, sh, r);
+  ctx.fill();
 
-  // Top-right segment
+  // Draw border as two paths so the day-name gap is preserved on the top edge.
+  // Top-left corner + left segment of top border
   ctx.beginPath();
-  ctx.moveTo(sx + gapStart + gapW, sy);
-  ctx.lineTo(sx + sw, sy);
-  ctx.stroke();
-
-  // Right, bottom, left sides
-  ctx.beginPath();
-  ctx.moveTo(sx + sw, sy);
-  ctx.lineTo(sx + sw, sy + sh);
-  ctx.lineTo(sx,       sy + sh);
-  ctx.lineTo(sx,       sy);
+  ctx.moveTo(sx + gapStart, sy);
+  ctx.lineTo(sx + r, sy);
+  ctx.arcTo(sx, sy, sx, sy + r, r);
+  ctx.lineTo(sx, sy + sh - r);
+  ctx.arcTo(sx, sy + sh, sx + r, sy + sh, r);
+  ctx.lineTo(sx + sw - r, sy + sh);
+  ctx.arcTo(sx + sw, sy + sh, sx + sw, sy + sh - r, r);
+  ctx.lineTo(sx + sw, sy + r);
+  ctx.arcTo(sx + sw, sy, sx + sw - r, sy, r);
+  ctx.lineTo(sx + gapStart + gapW, sy);
   ctx.stroke();
 
   // Label text centred in the gap on the top border
@@ -221,22 +231,23 @@ function drawDayBlock(name, wx, wy) {
 function drawTimeGrid(wx, wy) {
   const sx         = wx * scale + offsetX;
   const sy         = wy * scale + offsetY;
+  const gridOffY   = BLOCK_INNER_PAD_Y * scale;
   const labelAreaW = HOUR_LABEL_W * scale;
   const lineStartX = sx + labelAreaW;
-  const lineEndX   = sx + BLOCK_W * scale;
+  const lineEndX   = sx + (BLOCK_W - BLOCK_INNER_PAD) * scale;
   const fontSize   = Math.max(7, Math.round(10 * scale));
 
   ctx.strokeStyle  = '#dddddd';
   ctx.lineWidth    = 1;
   ctx.font         = `${fontSize}px sans-serif`;
   ctx.fillStyle    = '#777777';
-  ctx.textAlign    = 'right';
+  ctx.textAlign    = 'left';
   ctx.textBaseline = 'middle';
 
   for (let h = 0; h < HOURS_IN_DAY; h++) {
-    const lineY  = sy + h * HOUR_UNIT * scale;
+    const lineY  = sy + gridOffY + h * HOUR_UNIT * scale;
     const labelY = lineY + (HOUR_UNIT * scale) / 2;
-    const label  = `${String(h).padStart(2, '0')}:00`;
+    const label  = `${String((h + DAY_START_HOUR) % 24).padStart(2, '0')}:00`;
 
     // Hour separator line (skip h=0, which coincides with the top border)
     if (h > 0) {
@@ -247,8 +258,42 @@ function drawTimeGrid(wx, wy) {
     }
 
     // Hour label centred vertically within the hour slot
-    ctx.fillText(label, sx + labelAreaW - 4 * scale, labelY);
+    ctx.fillText(label, sx + BLOCK_INNER_PAD * scale, labelY);
   }
+}
+
+// Break `text` into lines that fit within `maxWidth` (canvas pixels).
+function wrapText(text, maxWidth) {
+  const words = text.split(' ');
+  const lines = [];
+  let current = '';
+  for (const word of words) {
+    const test = current ? current + ' ' + word : word;
+    if (ctx.measureText(test).width > maxWidth && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = test;
+    }
+  }
+  if (current) lines.push(current);
+  return lines.length ? lines : [''];
+}
+
+function isOverEventText(ev, sx, sy) {
+  const r        = getEventScreenRect(ev);
+  const fontSize = Math.max(15, Math.round(15 * scale));
+  ctx.font       = `${fontSize}px sans-serif`;
+  const text     = ev === editingEvent ? editText : (ev.title || '(no title)');
+  const maxW     = r.w - 8;
+  const lines    = wrapText(text, maxW);
+  const lineH    = fontSize * 1.3;
+  const totalH   = lines.length * lineH;
+  const textCX   = r.x + r.w / 2;
+  const textCY   = r.y + r.h / 2;
+  const blockW   = Math.max(...lines.map(l => ctx.measureText(l).width));
+  return sx >= textCX - blockW / 2 && sx <= textCX + blockW / 2 &&
+         sy >= textCY - totalH / 2 && sy <= textCY + totalH / 2;
 }
 
 // PR 2: Render a single event rectangle with resize handle and delete button
@@ -267,21 +312,52 @@ function drawEvent(ev) {
   ctx.strokeStyle = '#1d4ed8';
   ctx.lineWidth   = 1.5;
   ctx.beginPath();
-  ctx.roundRect(r.x, r.y, r.w, Math.max(r.h, 2), 3);
+  ctx.roundRect(r.x, r.y, r.w, Math.max(r.h, 2), 8);
   ctx.fill();
   ctx.stroke();
 
-  // Title (clipped to body)
-  const fontSize = Math.max(8, Math.round(11 * scale));
+  // Title (clipped to body) — rendered inline with word-wrap; cursor shown while editing
+  const fontSize = Math.max(15, Math.round(15 * scale));
+  const lineH    = fontSize * 1.3;
+  const maxTextW = r.w - 8;
   ctx.font        = `${fontSize}px sans-serif`;
   ctx.fillStyle   = '#ffffff';
-  ctx.textAlign   = 'left';
-  ctx.textBaseline = 'top';
+  ctx.textAlign   = 'center';
+  ctx.textBaseline = 'middle';
   ctx.save();
   ctx.beginPath();
-  ctx.rect(r.x + 3, r.y + 2, r.w - 22, r.h - 4);
+  ctx.rect(r.x + 4, r.y + 4, r.w - 8, r.h - 8);
   ctx.clip();
-  ctx.fillText(ev.title || '(no title)', r.x + 4, r.y + 3);
+  const isEditing   = ev === editingEvent;
+  const displayText = isEditing ? editText : (ev.title || '(no title)');
+  const lines       = wrapText(displayText, maxTextW);
+  const totalH      = lines.length * lineH;
+  const textCX      = r.x + r.w / 2;
+  const firstLineY  = r.y + r.h / 2 - totalH / 2 + lineH / 2;
+  lines.forEach((line, i) => {
+    ctx.fillText(line, textCX, firstLineY + i * lineH);
+  });
+  // Blinking cursor: find which line+offset the cursor falls on
+  if (isEditing && editBlinkOn) {
+    let charsLeft = editCursor;
+    let cursorLine = 0;
+    let cursorOffsetInLine = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (charsLeft <= lines[i].length || i === lines.length - 1) {
+        cursorLine = i;
+        cursorOffsetInLine = charsLeft;
+        break;
+      }
+      // +1 for the space that was consumed during wrapping
+      charsLeft -= lines[i].length + 1;
+    }
+    const lineText  = lines[cursorLine];
+    const beforeW   = ctx.measureText(lineText.slice(0, cursorOffsetInLine)).width;
+    const lineW     = ctx.measureText(lineText).width;
+    const cursorX   = textCX - lineW / 2 + beforeW;
+    const cursorY   = firstLineY + cursorLine * lineH;
+    ctx.fillRect(cursorX, cursorY - fontSize * 0.6, 1.5, fontSize * 1.2);
+  }
   ctx.restore();
 
   // Resize handle — visual affordance at the bottom
@@ -290,92 +366,103 @@ function drawEvent(ev) {
     ctx.fillRect(r.x + r.w * 0.3, r.y + r.h - RESIZE_HANDLE_PX + 2, r.w * 0.4, 3);
   }
 
+  // Duration label — bottom right
+  if (r.h >= 20 && r.w >= 30) {
+    const totalMins = Math.round(ev.durationHours * 60);
+    const hrs       = Math.floor(totalMins / 60);
+    const mins      = totalMins % 60;
+    const durLabel  = hrs > 0
+      ? (mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`)
+      : `${mins}m`;
+    const durFontSize = Math.max(8, Math.round(10 * scale));
+    ctx.font          = `${durFontSize}px sans-serif`;
+    ctx.fillStyle     = 'rgba(255,255,255,0.75)';
+    ctx.textAlign     = 'right';
+    ctx.textBaseline  = 'bottom';
+    ctx.fillText(durLabel, r.x + r.w - 6, r.y + r.h - 6);
+  }
+
   // Delete button (✕) — visible on hover or selection
-  if (isActive && r.h >= 12 && r.w >= 18) {
-    const btnX = r.x + r.w - 18;
-    const btnY = r.y + 2;
-    ctx.fillStyle = 'rgba(220,50,50,0.9)';
+  if (isActive && r.h >= 12 && r.w >= 22) {
+    const btnR  = 9;
+    const btnCX = r.x + r.w - btnR - 4;
+    const btnCY = r.y + btnR + 4;
+    // Same blue as the block but darker (higher opacity)
+    ctx.fillStyle = isSelected ? 'rgba(29,78,216,0.95)'
+                  :               'rgba(37,99,235,0.90)';
     ctx.beginPath();
-    ctx.roundRect(btnX, btnY, 14, 14, 3);
+    ctx.arc(btnCX, btnCY, btnR, 0, Math.PI * 2);
     ctx.fill();
-    const btnFontSize = Math.max(9, Math.round(10 * scale));
+    const btnFontSize = Math.max(9, Math.round(11 * scale));
     ctx.font         = `bold ${btnFontSize}px sans-serif`;
     ctx.fillStyle    = '#ffffff';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('✕', btnX + 7, btnY + 7);
+    ctx.fillText('✕', btnCX, btnCY);
   }
 }
 
-// ── PR 4: Title editing overlay ───────────────────────────────────────────────
-let titleInput   = null;
-let editingEvent = null;
+// ── Canvas-native inline text editing ────────────────────────────────────────
+let editingEvent  = null;
+let editText      = '';
+let editCursor    = 0;
+let editBlinkOn   = true;
+let editBlinkTimer = null;
 
-function showTitleInput(ev) {
-  hideTitleInput();
+function startEditing(ev) {
+  commitEdit();
   editingEvent  = ev;
+  editText      = ev.title;
+  editCursor    = editText.length;
   selectedEvent = ev;
+  editBlinkOn   = true;
+  editBlinkTimer = setInterval(() => { editBlinkOn = !editBlinkOn; draw(); }, 530);
+  draw();
+}
 
-  const r     = getEventScreenRect(ev);
-  const input = document.createElement('input');
-  input.type        = 'text';
-  input.value       = ev.title;
-  input.placeholder = 'Event title…';
-  Object.assign(input.style, {
-    position:     'fixed',
-    left:         `${r.x + 4}px`,
-    top:          `${Math.max(r.y + 2, 0)}px`,
-    width:        `${Math.max(60, r.w - 22)}px`,
-    height:       `${Math.min(22, Math.max(16, r.h - 6))}px`,
-    fontSize:     `${Math.max(10, Math.round(11 * scale))}px`,
-    padding:      '1px 3px',
-    border:       '1px solid #1d4ed8',
-    borderRadius: '3px',
-    background:   'rgba(255,255,255,0.95)',
-    color:        '#000',
-    outline:      'none',
-    zIndex:       '10',
-  });
-  document.body.appendChild(input);
-  input.focus();
-  input.select();
-  titleInput = input;
+function commitEdit() {
+  if (!editingEvent) return;
+  const live = events.find(e => e.id === editingEvent.id);
+  if (live) { live.title = editText; saveEvents(); }
+  _stopEditing();
+}
 
-  let committed = false;
+function cancelEdit() {
+  _stopEditing();
+}
 
-  function commit() {
-    if (committed) return;
-    committed = true;
-    // Guard against the event having been deleted while the input was open
-    const live = events.find(e => e.id === ev.id);
-    if (live) {
-      live.title = input.value;
-      saveEvents();
-    }
-    hideTitleInput();
-    draw();
+function _stopEditing() {
+  clearInterval(editBlinkTimer);
+  editBlinkTimer = null;
+  editingEvent   = null;
+  editText       = '';
+  editCursor     = 0;
+  draw();
+}
+
+window.addEventListener('keydown', (e) => {
+  if (!editingEvent) return;
+  e.preventDefault();
+  if (e.key === 'Enter')       { commitEdit(); return; }
+  if (e.key === 'Escape')      { cancelEdit(); return; }
+  if (e.key === 'Backspace')   { if (editCursor > 0) { editText = editText.slice(0, editCursor - 1) + editText.slice(editCursor); editCursor--; } }
+  else if (e.key === 'Delete') { editText = editText.slice(0, editCursor) + editText.slice(editCursor + 1); }
+  else if (e.key === 'ArrowLeft')  { editCursor = Math.max(0, editCursor - 1); }
+  else if (e.key === 'ArrowRight') { editCursor = Math.min(editText.length, editCursor + 1); }
+  else if (e.key === 'Home')   { editCursor = 0; }
+  else if (e.key === 'End')    { editCursor = editText.length; }
+  else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+    editText = editText.slice(0, editCursor) + e.key + editText.slice(editCursor);
+    editCursor++;
   }
-
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter')  commit();
-    if (e.key === 'Escape') { hideTitleInput(); draw(); }
-    e.stopPropagation();
-  });
-  input.addEventListener('blur', commit);
-}
-
-function hideTitleInput() {
-  if (!titleInput) return;
-  const inp  = titleInput;
-  titleInput   = null;   // nullify before remove to prevent re-entrant blur
-  editingEvent = null;
-  inp.remove();
-}
+  editBlinkOn = true;
+  draw();
+});
 
 // ── Mouse events ──────────────────────────────────────────────────────────────
 canvas.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
-  hideTitleInput();
+  commitEdit();
 
   const sx = e.clientX;
   const sy = e.clientY;
@@ -390,9 +477,14 @@ canvas.addEventListener('mousedown', (e) => {
     return;
   }
 
-  // Hit-test events → drag or resize
+  // Hit-test events → edit text, drag, or resize
   const hit = hitTestEvents(sx, sy);
   if (hit) {
+    // Single click on the text area → enter edit mode immediately
+    if (!hit.isResizeHandle && isOverEventText(hit.event, sx, sy)) {
+      startEditing(hit.event);
+      return;
+    }
     selectedEvent = hit.event;
     activeEvent   = hit.event;
     if (hit.isResizeHandle) {
@@ -404,7 +496,7 @@ canvas.addEventListener('mousedown', (e) => {
       interactionMode = 'drag';
       const w = screenToWorld(sx, sy);
       const block = DAY_BLOCKS[hit.event.dayIndex];
-      dragOffsetHour      = (w.y - block.wy) / HOUR_UNIT - hit.event.startHour;
+      dragOffsetHour      = (w.y - block.wy - BLOCK_INNER_PAD_Y) / HOUR_UNIT - hit.event.startHour;
       canvas.style.cursor = 'move';
     }
     draw();
@@ -417,7 +509,7 @@ canvas.addEventListener('mousedown', (e) => {
   isPanning           = true;
   lastMouseX          = sx;
   lastMouseY          = sy;
-  canvas.style.cursor = '';
+  canvas.style.cursor = 'grab';
   canvas.classList.add('panning');
   draw();
 });
@@ -437,12 +529,16 @@ window.addEventListener('mousemove', (e) => {
 
   if (interactionMode === 'drag' && activeEvent) {
     const w = screenToWorld(sx, sy);
-    // Determine target day column from world X
-    const targetBlock = DAY_BLOCKS.find(b => w.x >= b.wx && w.x <= b.wx + BLOCK_W) || null;
+    // Determine target day block from world X and Y so that row 0 and row 1
+    // blocks with overlapping X ranges resolve correctly.
+    const targetBlock = DAY_BLOCKS.find(b =>
+      w.x >= b.wx && w.x <= b.wx + BLOCK_W &&
+      w.y >= b.wy && w.y <= b.wy + BLOCK_H
+    ) || null;
     if (targetBlock) {
       activeEvent.dayIndex = targetBlock.index;
-      const raw      = (w.y - targetBlock.wy) / HOUR_UNIT - dragOffsetHour;
-      const snapped  = Math.round(raw);
+      const raw      = (w.y - targetBlock.wy - BLOCK_INNER_PAD_Y) / HOUR_UNIT - dragOffsetHour;
+      const snapped  = Math.round(raw * 2) / 2;
       const maxStart = HOURS_IN_DAY - activeEvent.durationHours;
       activeEvent.startHour = Math.max(0, Math.min(snapped, maxStart));
     }
@@ -453,9 +549,9 @@ window.addEventListener('mousemove', (e) => {
   if (interactionMode === 'resize' && activeEvent) {
     const dy      = sy - resizeOrigY;
     const rawHrs  = resizeOrigHours + (dy / scale) / HOUR_UNIT;
-    const snapped = Math.round(rawHrs);
+    const snapped = Math.round(rawHrs * 2) / 2;
     const maxHrs  = HOURS_IN_DAY - activeEvent.startHour;
-    activeEvent.durationHours = Math.max(1, Math.min(snapped, maxHrs));
+    activeEvent.durationHours = Math.max(0.5, Math.min(snapped, maxHrs));
     draw();
     return;
   }
@@ -468,7 +564,15 @@ window.addEventListener('mousemove', (e) => {
     draw();
   }
   if (hit) {
-    canvas.style.cursor = hit.isResizeHandle ? 'ns-resize' : 'move';
+    if (hitTestDeleteButton(sx, sy)) {
+      canvas.style.cursor = 'default';
+    } else if (hit.isResizeHandle) {
+      canvas.style.cursor = 'ns-resize';
+    } else if (isOverEventText(hit.event, sx, sy)) {
+      canvas.style.cursor = 'text';
+    } else {
+      canvas.style.cursor = 'move';
+    }
   } else {
     canvas.style.cursor = '';  // fall back to CSS cursor: grab
   }
@@ -490,23 +594,21 @@ canvas.addEventListener('dblclick', (e) => {
   const sx = e.clientX;
   const sy = e.clientY;
 
-  // Double-click on existing event → edit title
+  // Double-click on existing event → edit title inline
   const hit = hitTestEvents(sx, sy);
   if (hit && !hit.isResizeHandle) {
-    showTitleInput(hit.event);
-    draw();
+    startEditing(hit.event);
     return;
   }
 
-  // Double-click inside a day block → create a new 1-hour event
+  // Double-click inside a day block → create a new 1-hour event and edit it
   const block = hitTestDayBlock(sx, sy);
   if (block) {
     const w    = screenToWorld(sx, sy);
-    const raw  = (w.y - block.wy) / HOUR_UNIT;
-    const hour = Math.max(0, Math.min(Math.floor(raw), HOURS_IN_DAY - 1));
+    const raw  = (w.y - block.wy - BLOCK_INNER_PAD_Y) / HOUR_UNIT;
+    const hour = Math.max(0, Math.min(Math.round(raw * 2) / 2, HOURS_IN_DAY - 0.5));
     const ev   = createEvent(block.index, hour);
-    showTitleInput(ev);
-    draw();
+    startEditing(ev);
   }
 });
 

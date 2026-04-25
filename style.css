@@ -13,7 +13,7 @@ html, body {
 
 canvas {
   display: block;
-  cursor: grab;
+  cursor: default;
 }
 
 canvas.panning {
