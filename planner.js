@@ -168,7 +168,7 @@ let events = loadEvents();
 let nextId  = events.reduce((m, e) => Math.max(m, e.id + 1), 0);
 
 function createEvent(dayIndex, startHour, title = '') {
-  const ev = { id: nextId++, dayIndex, startHour, durationHours: 1, title };
+  const ev = { id: nextId++, dayIndex, startHour, durationHours: 1, title, color: '#3b82f6', repeatDays: [] };
   events.push(ev);
   saveEvents();
   return ev;
@@ -185,12 +185,58 @@ function screenToWorld(sx, sy) {
 }
 
 // ── Event geometry ─────────────────────────────────────────────────────────────
+// ── Overlap layout ────────────────────────────────────────────────────────────
+// For each event, compute _col (0-based column index) and _totalCols so that
+// simultaneous events sit side-by-side instead of stacking on top of each other.
+function computeEventLayout() {
+  for (let day = 0; day < 7; day++) {
+    const dayEvs = events.filter(e => e.dayIndex === day)
+                         .sort((a, b) => a.startHour - b.startHour || a.id - b.id);
+    if (!dayEvs.length) continue;
+
+    // Group into clusters of transitively-overlapping events
+    const clusters = [];
+    dayEvs.forEach(ev => {
+      const evEnd = ev.startHour + ev.durationHours;
+      let placed = false;
+      for (const cluster of clusters) {
+        const overlapsCluster = cluster.some(e =>
+          ev.startHour < e.startHour + e.durationHours &&
+          e.startHour  < evEnd
+        );
+        if (overlapsCluster) { cluster.push(ev); placed = true; break; }
+      }
+      if (!placed) clusters.push([ev]);
+    });
+
+    // Within each cluster assign columns by stable id order so columns
+    // never swap while dragging
+    for (const cluster of clusters) {
+      // Re-sort cluster by id for stable column assignment
+      cluster.sort((a, b) => a.id - b.id);
+      const colEnds = [];
+      cluster.forEach(ev => {
+        let col = colEnds.findIndex(e => e <= ev.startHour);
+        if (col === -1) col = colEnds.length;
+        colEnds[col] = ev.startHour + ev.durationHours;
+        ev._col = col;
+      });
+      const totalCols = colEnds.length;
+      cluster.forEach(ev => { ev._totalCols = totalCols; });
+    }
+  }
+}
+
 function getEventScreenRect(ev) {
-  const block = DAY_BLOCKS[ev.dayIndex];
-  const wx    = block.wx + HOUR_LABEL_W;
-  const wy    = block.wy + BLOCK_INNER_PAD_Y + ev.startHour * HOUR_UNIT;
-  const ww    = BLOCK_W  - HOUR_LABEL_W - BLOCK_INNER_PAD;
-  const wh    = ev.durationHours * HOUR_UNIT;
+  const block      = DAY_BLOCKS[ev.dayIndex];
+  const totalCols  = ev._totalCols || 1;
+  const col        = ev._col       || 0;
+  const fullW      = BLOCK_W - HOUR_LABEL_W - BLOCK_INNER_PAD;
+  const colW       = fullW / totalCols;
+  const wx         = block.wx + HOUR_LABEL_W + col * colW;
+  const wy         = block.wy + BLOCK_INNER_PAD_Y + ev.startHour * HOUR_UNIT;
+  const ww         = colW;
+  const wh         = ev.durationHours * HOUR_UNIT;
   return {
     x: wx * scale + offsetX,
     y: wy * scale + offsetY,
@@ -207,21 +253,6 @@ function hitTestEvents(sx, sy) {
     if (sx >= r.x && sx <= r.x + r.w && sy >= r.y && sy <= r.y + r.h) {
       return { event: ev, isResizeHandle: sy >= r.y + r.h - RESIZE_HANDLE_PX };
     }
-  }
-  return null;
-}
-
-function hitTestDeleteButton(sx, sy) {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const ev = events[i];
-    if (ev !== hoveredEvent && ev !== selectedEvent) continue;
-    const r    = getEventScreenRect(ev);
-    const btnR  = 9;
-    const btnCX = r.x + r.w - btnR - 4;
-    const btnCY = r.y + btnR + 4;
-    const dx = sx - btnCX;
-    const dy = sy - btnCY;
-    if (dx * dx + dy * dy <= btnR * btnR) return ev;
   }
   return null;
 }
@@ -263,6 +294,9 @@ function draw() {
 
   ctx.clearRect(0, 0, w, h);
 
+  // Recompute side-by-side layout for overlapping events
+  computeEventLayout();
+
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, w, h);
 
@@ -279,6 +313,9 @@ function draw() {
     }
   }
 
+  // Static UI buttons (screen-space, unaffected by pan/zoom)
+  // Drawn FIRST so the rest of the scene paints over them — moved to end of draw()
+
   // Day blocks with time grid, then events on top
   drawDayBlock(WEEKLY_PLANNER_BLOCK.name, null, WEEKLY_PLANNER_BLOCK.wx, WEEKLY_PLANNER_BLOCK.wy);
   drawWeeklyPlannerContent(WEEKLY_PLANNER_BLOCK.wx, WEEKLY_PLANNER_BLOCK.wy);
@@ -292,6 +329,12 @@ function draw() {
     drawTimeGrid(wx, wy);
   });
   events.forEach(ev => drawEvent(ev));
+  drawRepeatGhosts();
+
+  // Static UI buttons drawn last so they always appear on top
+  drawEditEventButton();
+  drawCopyEventButton();
+  drawDeleteEventButton();
 }
 
 function drawDayBlock(name, dateStr, wx, wy) {
@@ -471,7 +514,8 @@ function drawWeeklyPlannerContent(wx, wy) {
     }
 
     const inputX = sx + textOffX;
-    const inputW = maxTextW;
+    const delFontSzLocal = Math.max(10, Math.round(13 * scale));
+    const inputW = maxTextW - delFontSzLocal * 2 - 6 * scale;
     const inputH = rowH * 0.78;
     const inputY = midY - inputH / 2;
 
@@ -589,9 +633,81 @@ function drawWeeklyPlannerContent(wx, wy) {
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText('+ Add item', sx + pad, addMidY);
-    todoHitAreas.push({ type: 'add', id: null, x: sx + pad, y: addY, w: 120 * scale, h: rowH });
+    todoHitAreas.push({ type: 'add', id: null, x: sx + pad, y: addY, w: sw - pad * 2, h: rowH });
   }
 }
+
+// ── Static UI: Management buttons (Copy | Edit | Delete) ─────────────────────
+// Buttons are laid out horizontally in the top-right corner.
+// Index: 0 = Copy (yellow), 1 = Edit (blue), 2 = Delete (red)
+const MGMT_BTN_W  = 60;
+const MGMT_BTN_H  = 60;
+const MGMT_BTN_MR = 16;  // margin from right edge
+const MGMT_BTN_MT = 16;  // margin from top edge
+const MGMT_BTN_GAP = 10; // gap between buttons
+const MGMT_BTN_COUNT = 3;
+
+function getMgmtButtonRect(index) {
+  // index 0 = top (Copy), 1 = middle (Edit), 2 = bottom (Delete)
+  return {
+    x: canvas.width - MGMT_BTN_MR - MGMT_BTN_W,
+    y: MGMT_BTN_MT + index * (MGMT_BTN_H + MGMT_BTN_GAP),
+    w: MGMT_BTN_W,
+    h: MGMT_BTN_H,
+  };
+}
+
+// Kept for backward-compat with existing call sites
+function getEditEventButtonRect()  { return getMgmtButtonRect(1); }
+function getCopyEventButtonRect()  { return getMgmtButtonRect(0); }
+function getDeleteEventButtonRect(){ return getMgmtButtonRect(2); }
+
+function drawEditEventButton() {
+  drawStaticButton(getMgmtButtonRect(1), selectedEvent !== null, '#3b82f6', '#1d4ed8', '✎', '27px sans-serif');
+}
+
+function drawCopyEventButton() {
+  drawStaticButton(getMgmtButtonRect(0), selectedEvent !== null, '#f59e0b', '#b45309', '⧉', '24px sans-serif');
+}
+
+function drawDeleteEventButton() {
+  drawStaticButton(getMgmtButtonRect(2), selectedEvent !== null, '#c0544a', '#8b3a33', '✕', '24px sans-serif');
+}
+
+function drawStaticButton(r, enabled, colorOn, borderOn, icon, font) {
+  const radius = 8;
+  ctx.save();
+  ctx.shadowColor   = 'rgba(0,0,0,0.15)';
+  ctx.shadowBlur    = 6;
+  ctx.shadowOffsetY = 2;
+
+  ctx.fillStyle = enabled ? colorOn : '#d1d5db';
+  ctx.beginPath();
+  ctx.roundRect(r.x, r.y, r.w, r.h, radius);
+  ctx.fill();
+  ctx.shadowColor = 'transparent';
+
+  ctx.strokeStyle = enabled ? borderOn : '#9ca3af';
+  ctx.lineWidth   = 1.5;
+  ctx.stroke();
+
+  ctx.font         = font;
+  ctx.fillStyle    = enabled ? '#ffffff' : '#9ca3af';
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(icon, r.x + r.w / 2, r.y + r.h / 2);
+
+  ctx.restore();
+}
+
+function hitTestMgmtButton(sx, sy, index) {
+  const r = getMgmtButtonRect(index);
+  return sx >= r.x && sx <= r.x + r.w && sy >= r.y && sy <= r.y + r.h;
+}
+
+function hitTestEditEventButton(sx, sy)   { return hitTestMgmtButton(sx, sy, 1); }
+function hitTestCopyEventButton(sx, sy)   { return hitTestMgmtButton(sx, sy, 0); }
+function hitTestDeleteEventButton(sx, sy) { return hitTestMgmtButton(sx, sy, 2); }
 
 // PR 1: Draw horizontal hour lines and labels inside a day block
 function drawTimeGrid(wx, wy) {
@@ -662,6 +778,101 @@ function isOverEventText(ev, sx, sy) {
          sy >= textCY - totalH / 2 && sy <= textCY + totalH / 2;
 }
 
+// ── Color helpers ────────────────────────────────────────────────────────────
+function hexToRgb(hex) {
+  const n = parseInt(hex.replace('#', ''), 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+function shadeHex(hex, amount) {
+  const { r, g, b } = hexToRgb(hex);
+  const clamp = v => Math.max(0, Math.min(255, v + amount));
+  return '#' + [clamp(r), clamp(g), clamp(b)].map(v => v.toString(16).padStart(2, '0')).join('');
+}
+
+// ── Repeat ghost rendering ────────────────────────────────────────────────────
+function drawRepeatGhosts() {
+  events.forEach(ev => {
+    if (!ev.repeatDays || ev.repeatDays.length === 0) return;
+    ev.repeatDays.forEach(dayIdx => {
+      if (dayIdx === ev.dayIndex) return;
+      // Draw a translucent ghost on the repeat day
+      const ghostEv = Object.assign({}, ev, { dayIndex: dayIdx, _col: 0, _totalCols: 1 });
+      const r       = getEventScreenRect(ghostEv);
+      if (r.w < 1 || r.h < 1) return;
+      const evColor = ev.color || '#3b82f6';
+      const rgb     = hexToRgb(evColor);
+      ctx.save();
+      ctx.globalAlpha = 0.55;
+
+      // Body
+      ctx.fillStyle   = `rgb(${rgb.r},${rgb.g},${rgb.b})`;
+      ctx.strokeStyle = shadeHex(evColor, -40);
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(r.x, r.y, r.w, Math.max(r.h, 2), 8);
+      ctx.fill();
+      ctx.stroke();
+
+      // Clip to body interior
+      ctx.beginPath();
+      ctx.rect(r.x + 4, r.y + 4, r.w - 8, r.h - 8);
+      ctx.clip();
+
+      const fontSize    = Math.max(15, Math.round(15 * scale));
+      const iconSize    = Math.max(14, Math.round(18 * scale));
+      const lineH       = fontSize * 1.3;
+      const longEvent   = ev.durationHours > 1;
+      // Reserve bottom space for the icon only when there's room
+      const iconReserve = longEvent ? (iconSize * 1.4) : 0;
+
+      // Title
+      const displayText = ev.title || '(no title)';
+      ctx.font         = `${fontSize}px sans-serif`;
+      const maxTextW   = r.w - 8;
+      const words      = displayText.split(' ');
+      const lines      = [];
+      let cur = '';
+      for (const w of words) {
+        const test = cur ? cur + ' ' + w : w;
+        if (ctx.measureText(test).width > maxTextW && cur) { lines.push(cur); cur = w; }
+        else cur = test;
+      }
+      if (cur) lines.push(cur);
+
+      const totalTextH = lines.length * lineH;
+      const innerH     = Math.max(r.h - 8 - iconReserve, 0);
+      const firstLineY = r.y + 4 + innerH / 2 - totalTextH / 2 + lineH / 2;
+
+      ctx.fillStyle    = '#ffffff';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      lines.forEach((line, i) => {
+        ctx.fillText(line, r.x + r.w / 2, firstLineY + i * lineH);
+      });
+
+      // Repeat icon
+      ctx.font = `${iconSize}px sans-serif`;
+      if (longEvent) {
+        // Centred below the text, near the bottom
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('↺', r.x + r.w / 2, r.y + r.h - 6);
+      } else {
+        // Inline after the first line of text — measure with title font first
+        ctx.font = `${fontSize}px sans-serif`;
+        const textW = ctx.measureText(lines[0] || '').width;
+        ctx.font = `${iconSize}px sans-serif`;
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('↺', r.x + r.w / 2 + textW / 2 + 4, firstLineY);
+      }
+
+      ctx.restore();
+    });
+  });
+}
+
 // PR 2: Render a single event rectangle with resize handle and delete button
 function drawEvent(ev) {
   const r          = getEventScreenRect(ev);
@@ -671,11 +882,16 @@ function drawEvent(ev) {
 
   if (r.w < 1 || r.h < 1) return;
 
+  // Resolve color — default to blue if not set
+  const evColor   = ev.color || '#3b82f6';
+  const rgb       = hexToRgb(evColor);
+  const rgbStr    = `${rgb.r},${rgb.g},${rgb.b}`;
+
   // Body
-  ctx.fillStyle   = isSelected ? 'rgba(59,130,246,0.85)'
-                  : isHovered  ? 'rgba(59,130,246,0.70)'
-                  :               'rgba(59,130,246,0.55)';
-  ctx.strokeStyle = '#1d4ed8';
+  ctx.fillStyle   = isSelected ? `rgba(${rgbStr},0.92)`
+                  : isHovered  ? `rgba(${rgbStr},0.78)`
+                  :               `rgba(${rgbStr},0.62)`;
+  ctx.strokeStyle = shadeHex(evColor, -40);
   ctx.lineWidth   = 1.5;
   ctx.beginPath();
   ctx.roundRect(r.x, r.y, r.w, Math.max(r.h, 2), 8);
@@ -686,6 +902,24 @@ function drawEvent(ev) {
   const fontSize = Math.max(15, Math.round(15 * scale));
   const lineH    = fontSize * 1.3;
   const maxTextW = r.w - 8;
+
+  // Time labels: none for 30 min, start-only for 1 h, start+end for >1 h
+  const timeFontSize  = Math.max(8, Math.round(9 * scale));
+  const showStart     = ev.durationHours >= 1;
+  const showEnd       = ev.durationHours > 1;
+  const timePadX      = 5;
+  const timePadY      = 3;
+  const timeReserveTop    = showStart ? (timeFontSize + timePadY * 2) : 0;
+  const timeReserveBottom = showEnd   ? (timeFontSize + timePadY * 2) : 0;
+
+  const startHourAbs = DAY_START_HOUR + ev.startHour;
+  const endHourAbs   = DAY_START_HOUR + ev.startHour + ev.durationHours;
+  function fmtHour(h) {
+    const hh = String(Math.floor(h) % 24).padStart(2, '0');
+    const mm = (h % 1 !== 0) ? '30' : '00';
+    return `${hh}:${mm}`;
+  }
+
   ctx.font        = `${fontSize}px sans-serif`;
   ctx.fillStyle   = '#ffffff';
   ctx.textAlign   = 'center';
@@ -698,8 +932,14 @@ function drawEvent(ev) {
   const displayText = isEditing ? editText : (ev.title || '(no title)');
   const lines       = wrapText(displayText, maxTextW);
   const totalH      = lines.length * lineH;
+  // Vertically centre the title in the space NOT occupied by time labels.
+  // Use the larger reserve on both sides so centering stays symmetric.
+  const symReserve  = Math.max(timeReserveTop, timeReserveBottom);
+  const innerTop    = r.y + 4 + symReserve;
+  const innerBot    = r.y + r.h - 4 - symReserve;
+  const innerH      = Math.max(innerBot - innerTop, 0);
   const textCX      = r.x + r.w / 2;
-  const firstLineY  = r.y + r.h / 2 - totalH / 2 + lineH / 2;
+  const firstLineY  = innerTop + innerH / 2 - totalH / 2 + lineH / 2;
   lines.forEach((line, i) => {
     ctx.fillText(line, textCX, firstLineY + i * lineH);
   });
@@ -724,6 +964,22 @@ function drawEvent(ev) {
     const cursorY   = firstLineY + cursorLine * lineH;
     ctx.fillRect(cursorX, cursorY - fontSize * 0.6, 1.5, fontSize * 1.2);
   }
+
+  // Time labels inside clip
+  if (showStart || showEnd) {
+    ctx.font         = `${timeFontSize}px sans-serif`;
+    ctx.fillStyle    = 'rgba(255,255,255,0.85)';
+    ctx.textAlign    = 'left';
+    if (showStart) {
+      ctx.textBaseline = 'top';
+      ctx.fillText(fmtHour(startHourAbs), r.x + timePadX + 4, r.y + timePadY + 4);
+    }
+    if (showEnd) {
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(fmtHour(endHourAbs), r.x + timePadX + 4, r.y + r.h - timePadY - 4);
+    }
+  }
+
   ctx.restore();
 
   // Resize handle — visual affordance at the bottom
@@ -746,25 +1002,6 @@ function drawEvent(ev) {
     ctx.textAlign     = 'right';
     ctx.textBaseline  = 'bottom';
     ctx.fillText(durLabel, r.x + r.w - 6, r.y + r.h - 6);
-  }
-
-  // Delete button (✕) — visible on hover or selection
-  if (isActive && r.h >= 12 && r.w >= 22) {
-    const btnR  = 9;
-    const btnCX = r.x + r.w - btnR - 4;
-    const btnCY = r.y + btnR + 4;
-    // Same blue as the block but darker (higher opacity)
-    ctx.fillStyle = isSelected ? 'rgba(29,78,216,0.95)'
-                  :               'rgba(37,99,235,0.90)';
-    ctx.beginPath();
-    ctx.arc(btnCX, btnCY, btnR, 0, Math.PI * 2);
-    ctx.fill();
-    const btnFontSize = Math.max(9, Math.round(11 * scale));
-    ctx.font         = `bold ${btnFontSize}px sans-serif`;
-    ctx.fillStyle    = '#ffffff';
-    ctx.textAlign    = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('✕', btnCX, btnCY);
   }
 }
 
@@ -900,21 +1137,43 @@ window.addEventListener('keydown', (e) => {
 // ── Mouse events ──────────────────────────────────────────────────────────────
 canvas.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
-  commitEdit();
-  commitTodoEdit();
 
   const sx = e.clientX;
   const sy = e.clientY;
 
-  // Check delete button first
-  const delEv = hitTestDeleteButton(sx, sy);
-  if (delEv) {
-    if (selectedEvent === delEv) selectedEvent = null;
-    if (hoveredEvent  === delEv) hoveredEvent  = null;
-    deleteEvent(delEv.id);
-    draw();
+  // Check Edit Event button (screen-space, before committing edits)
+  if (hitTestEditEventButton(sx, sy)) {
+    if (selectedEvent) openEditModal(selectedEvent);
     return;
   }
+
+  // Check Copy Event button
+  if (hitTestCopyEventButton(sx, sy)) {
+    if (selectedEvent) {
+      const orig = selectedEvent;
+      const copy = createEvent(orig.dayIndex, orig.startHour, orig.title);
+      copy.durationHours = orig.durationHours;
+      saveEvents();
+      selectedEvent = copy;
+      draw();
+    }
+    return;
+  }
+
+  // Check Delete Event button
+  if (hitTestDeleteEventButton(sx, sy)) {
+    if (selectedEvent) {
+      const toDelete = selectedEvent;
+      selectedEvent = null;
+      hoveredEvent  = hoveredEvent === toDelete ? null : hoveredEvent;
+      deleteEvent(toDelete.id);
+      draw();
+    }
+    return;
+  }
+
+  commitEdit();
+  commitTodoEdit();
 
   // Hit-test events → edit text, drag, or resize
   const hit = hitTestEvents(sx, sy);
@@ -1026,9 +1285,7 @@ window.addEventListener('mousemove', (e) => {
     draw();
   }
   if (hit) {
-    if (hitTestDeleteButton(sx, sy)) {
-      canvas.style.cursor = 'default';
-    } else if (hit.isResizeHandle) {
+    if (hit.isResizeHandle) {
       canvas.style.cursor = 'ns-resize';
     } else if (isOverEventText(hit.event, sx, sy)) {
       canvas.style.cursor = 'text';
@@ -1110,15 +1367,45 @@ const TAP_MAX_MOVE   = 10;  // px
 const DOUBLE_TAP_GAP = 300; // ms
 
 function handleSingleTap(sx, sy) {
+  // Check Edit Event button first (screen-space)
+  if (hitTestEditEventButton(sx, sy)) {
+    if (selectedEvent) openEditModal(selectedEvent);
+    return;
+  }
+
+  // Check Copy Event button
+  if (hitTestCopyEventButton(sx, sy)) {
+    if (selectedEvent) {
+      const orig = selectedEvent;
+      const copy = createEvent(orig.dayIndex, orig.startHour, orig.title);
+      copy.durationHours = orig.durationHours;
+      saveEvents();
+      selectedEvent = copy;
+      draw();
+    }
+    return;
+  }
+
+  // Check Delete Event button
+  if (hitTestDeleteEventButton(sx, sy)) {
+    if (selectedEvent) {
+      const toDelete = selectedEvent;
+      selectedEvent = null;
+      hoveredEvent  = hoveredEvent === toDelete ? null : hoveredEvent;
+      deleteEvent(toDelete.id);
+      draw();
+    }
+    return;
+  }
+
   // Mirrors mousedown logic for todo hit areas and delete/checkbox
   commitEdit();
   commitTodoEdit();
 
-  const delEv = hitTestDeleteButton(sx, sy);
-  if (delEv) {
-    if (selectedEvent === delEv) selectedEvent = null;
-    if (hoveredEvent  === delEv) hoveredEvent  = null;
-    deleteEvent(delEv.id);
+  // Tap on an event → select it
+  const evHit = hitTestEvents(sx, sy);
+  if (evHit && !evHit.isResizeHandle) {
+    selectedEvent = evHit.event;
     draw();
     return;
   }
@@ -1137,6 +1424,12 @@ function handleSingleTap(sx, sy) {
       startTodoEdit(todoHit.id, todos.find(t => t.id === todoHit.id)?.text ?? '');
     }
     return;
+  }
+
+  // Tapped on empty space — deselect any selected event
+  if (selectedEvent) {
+    selectedEvent = null;
+    draw();
   }
 }
 
@@ -1327,6 +1620,234 @@ canvas.addEventListener('touchend', (e) => {
     }
   }
 }, { passive: false });
+
+// ── Event Edit Modal ─────────────────────────────────────────────────────────
+const EVENT_COLORS = [
+  '#3b82f6', '#22c55e', '#a855f7', '#ec4899',
+  '#f97316', '#14b8a6', '#ef4444', '#eab308',
+];
+
+(function buildModal() {
+  const style = document.createElement('style');
+  style.textContent = `
+    #event-modal-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.45);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    #event-modal-overlay.open { display: flex; }
+    #event-modal {
+      background: #fff;
+      border-radius: 14px;
+      padding: 28px 32px 22px;
+      width: min(480px, 94vw);
+      box-shadow: 0 8px 40px rgba(0,0,0,0.22);
+      font-family: sans-serif;
+    }
+    #event-modal h2 {
+      margin: 0 0 20px;
+      font-size: 18px;
+      color: #111;
+    }
+    .em-field { margin-bottom: 16px; }
+    .em-field label { display: block; font-size: 12px; color: #555; margin-bottom: 5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+    .em-field input[type=text] {
+      width: 100%; box-sizing: border-box;
+      border: 1.5px solid #d1d5db; border-radius: 8px;
+      padding: 8px 10px; font-size: 15px; outline: none;
+    }
+    .em-field input[type=text]:focus { border-color: #3b82f6; }
+    .em-time-row { display: flex; gap: 14px; }
+    .em-time-row .em-field { flex: 1; }
+    .em-field select {
+      width: 100%; box-sizing: border-box;
+      border: 1.5px solid #d1d5db; border-radius: 8px;
+      padding: 8px 10px; font-size: 15px; outline: none; background: #fff;
+    }
+    .em-field select:focus { border-color: #3b82f6; }
+    .em-colors { display: flex; gap: 10px; flex-wrap: wrap; }
+    .em-color-swatch {
+      width: 34px; height: 34px; border-radius: 50%;
+      cursor: pointer; border: 3px solid transparent;
+      transition: transform .1s;
+    }
+    .em-color-swatch:hover { transform: scale(1.12); }
+    .em-color-swatch.selected { border-color: #111; }
+    .em-days { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .em-day-btn {
+      padding: 5px 10px; border-radius: 20px;
+      border: 1.5px solid #d1d5db; background: #f9fafb;
+      font-size: 13px; cursor: pointer; user-select: none;
+      transition: background .1s, border-color .1s;
+    }
+    .em-day-btn.active { background: #3b82f6; border-color: #1d4ed8; color: #fff; }
+    .em-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+    .em-btn {
+      padding: 9px 22px; border-radius: 8px; border: none;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .em-btn-cancel { background: #f3f4f6; color: #374151; }
+    .em-btn-cancel:hover { background: #e5e7eb; }
+    .em-btn-save { background: #3b82f6; color: #fff; }
+    .em-btn-save:hover { background: #2563eb; }
+  `;
+  document.head.appendChild(style);
+
+  const overlay = document.createElement('div');
+  overlay.id = 'event-modal-overlay';
+
+  const DAYS_SHORT = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+  // Build time options (06:00 – 24:00 in 30-min steps)
+  function timeOptions() {
+    let html = '';
+    for (let h = 6; h <= 24; h++) {
+      for (let m = 0; m < 60; m += 30) {
+        if (h === 24 && m > 0) break;
+        const hh = String(h).padStart(2, '0');
+        const mm = String(m).padStart(2, '0');
+        const val = h * 60 + m; // minutes from midnight
+        html += `<option value="${val}">${hh}:${mm}</option>`;
+      }
+    }
+    return html;
+  }
+
+  overlay.innerHTML = `
+    <div id="event-modal">
+      <h2>Edit Event</h2>
+      <div class="em-field">
+        <label>Event name</label>
+        <input type="text" id="em-title" autocomplete="off" />
+      </div>
+      <div class="em-time-row">
+        <div class="em-field">
+          <label>Start time</label>
+          <select id="em-start">${timeOptions()}</select>
+        </div>
+        <div class="em-field">
+          <label>End time</label>
+          <select id="em-end">${timeOptions()}</select>
+        </div>
+      </div>
+      <div class="em-field">
+        <label>Color</label>
+        <div class="em-colors" id="em-colors"></div>
+      </div>
+      <div class="em-field">
+        <label>Repeat on</label>
+        <div class="em-days" id="em-days"></div>
+      </div>
+      <div class="em-footer">
+        <button class="em-btn em-btn-cancel" id="em-cancel">Cancel</button>
+        <button class="em-btn em-btn-save" id="em-save">Save</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // Build color swatches
+  const colorsEl = overlay.querySelector('#em-colors');
+  EVENT_COLORS.forEach(hex => {
+    const sw = document.createElement('div');
+    sw.className = 'em-color-swatch';
+    sw.style.background = hex;
+    sw.dataset.color = hex;
+    sw.addEventListener('click', () => {
+      colorsEl.querySelectorAll('.em-color-swatch').forEach(s => s.classList.remove('selected'));
+      sw.classList.add('selected');
+    });
+    colorsEl.appendChild(sw);
+  });
+
+  // Build day buttons
+  const daysEl = overlay.querySelector('#em-days');
+  DAYS_SHORT.forEach((d, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'em-day-btn';
+    btn.textContent = d;
+    btn.dataset.day = i;
+    btn.addEventListener('click', () => btn.classList.toggle('active'));
+    daysEl.appendChild(btn);
+  });
+
+  // Close on overlay background click
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeEditModal(); });
+  overlay.querySelector('#em-cancel').addEventListener('click', closeEditModal);
+  overlay.querySelector('#em-save').addEventListener('click', saveEditModal);
+})();
+
+let _editingModalEvent = null;
+
+function openEditModal(ev) {
+  _editingModalEvent = ev;
+  const overlay = document.getElementById('event-modal-overlay');
+
+  // Populate title
+  overlay.querySelector('#em-title').value = ev.title || '';
+
+  // Populate start/end times
+  const startMins = (DAY_START_HOUR + ev.startHour) * 60;
+  const endMins   = (DAY_START_HOUR + ev.startHour + ev.durationHours) * 60;
+  const startSel  = overlay.querySelector('#em-start');
+  const endSel    = overlay.querySelector('#em-end');
+  startSel.value = startMins;
+  endSel.value   = Math.min(endMins, 24 * 60); // cap at midnight
+
+  // Color swatches
+  const currentColor = ev.color || '#3b82f6';
+  overlay.querySelectorAll('.em-color-swatch').forEach(sw => {
+    sw.classList.toggle('selected', sw.dataset.color === currentColor);
+  });
+
+  // Day buttons
+  const repeatDays = ev.repeatDays || [];
+  overlay.querySelectorAll('.em-day-btn').forEach(btn => {
+    btn.classList.toggle('active', repeatDays.includes(Number(btn.dataset.day)));
+  });
+
+  overlay.classList.add('open');
+  overlay.querySelector('#em-title').focus();
+}
+
+function closeEditModal() {
+  document.getElementById('event-modal-overlay').classList.remove('open');
+  _editingModalEvent = null;
+}
+
+function saveEditModal() {
+  if (!_editingModalEvent) return;
+  const overlay = document.getElementById('event-modal-overlay');
+  const ev      = events.find(e => e.id === _editingModalEvent.id);
+  if (!ev) { closeEditModal(); return; }
+
+  // Title
+  ev.title = overlay.querySelector('#em-title').value.trim();
+
+  // Times
+  const startMins = Number(overlay.querySelector('#em-start').value);
+  const endMins   = Number(overlay.querySelector('#em-end').value);
+  const clampedEnd = Math.max(endMins, startMins + 30); // at least 30 min
+  ev.startHour     = startMins / 60 - DAY_START_HOUR;
+  ev.durationHours = (clampedEnd - startMins) / 60;
+
+  // Color
+  const selectedSwatch = overlay.querySelector('.em-color-swatch.selected');
+  if (selectedSwatch) ev.color = selectedSwatch.dataset.color;
+
+  // Repeat days
+  ev.repeatDays = [];
+  overlay.querySelectorAll('.em-day-btn.active').forEach(btn => {
+    ev.repeatDays.push(Number(btn.dataset.day));
+  });
+
+  saveEvents();
+  closeEditModal();
+  draw();
+}
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 window.addEventListener('resize', resize);
