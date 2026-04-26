@@ -1022,6 +1022,7 @@ function startTodoEdit(id, initialText) {
   todoEditBlinkTimer = setInterval(() => { todoEditBlinkOn = !todoEditBlinkOn; draw(); }, 530);
   hiddenInput.value = initialText;
   hiddenInput.focus();
+  hiddenInput.setSelectionRange(initialText.length, initialText.length);
   draw();
 }
 
@@ -1068,6 +1069,7 @@ function startEditing(ev) {
   editBlinkTimer = setInterval(() => { editBlinkOn = !editBlinkOn; draw(); }, 530);
   hiddenInput.value = ev.title;
   hiddenInput.focus();
+  hiddenInput.setSelectionRange(ev.title.length, ev.title.length);
   draw();
 }
 
